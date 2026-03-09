@@ -159,6 +159,10 @@ fi
 echo ""
 echo "$cmd"
 
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  export CGO_LDFLAGS="${CGO_LDFLAGS:+$CGO_LDFLAGS }-Wl,-no_warn_duplicate_libraries"
+fi
+
 if ! eval "$cmd"; then
   exit 1
 fi

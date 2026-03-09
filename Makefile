@@ -34,8 +34,10 @@ endif
 UNAME_S := $(shell uname -s)
 
 # In Mac OSX, there are a lot of warnings emitted if these environment variables aren't set.
+# Use the SDK version (not the OS version from sw_vers) so that Rust-compiled libraries
+# match the deployment target that Go/CGO defaults to when MACOSX_DEPLOYMENT_TARGET is unset.
 ifeq ($(UNAME_S), Darwin)
-  export MACOSX_DEPLOYMENT_TARGET := $(shell sw_vers -productVersion)
+  export MACOSX_DEPLOYMENT_TARGET := $(shell xcrun --show-sdk-version 2>/dev/null || sw_vers -productVersion)
   export CGO_LDFLAGS := -Wl,-no_warn_duplicate_libraries
 endif
 

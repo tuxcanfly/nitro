@@ -548,6 +548,7 @@ func setupL1ForBoldProtocol(
 	nodeConfig *arbnode.Config,
 	chainConfig *params.ChainConfig,
 	enableCustomDA bool,
+	useCelestiaDA ...bool,
 ) (
 	l1info info, l1backend *eth.Ethereum, l1client *ethclient.Client, l1stack *node.Node,
 	addresses *chaininfo.RollupAddresses, stakeTokenAddr common.Address, asserterOpts *bind.TransactOpts,
@@ -623,7 +624,7 @@ func setupL1ForBoldProtocol(
 	Require(t, err)
 	l1TransactionOpts.Value = nil
 
-	addresses = deployContractsOnly(t, ctx, l1info, l1client, chainConfig.ChainID, rollupStackConf, stakeToken, asserterOpts, enableCustomDA)
+	addresses = deployContractsOnly(t, ctx, l1info, l1client, chainConfig.ChainID, rollupStackConf, stakeToken, asserterOpts, enableCustomDA, useCelestiaDA...)
 	l1info.SetContract("Bridge", addresses.Bridge)
 	l1info.SetContract("SequencerInbox", addresses.SequencerInbox)
 	l1info.SetContract("Inbox", addresses.Inbox)
@@ -750,6 +751,7 @@ func createTestNodeOnL1ForBoldProtocol(
 	l2infoIn info,
 	useExternalSigner bool,
 	enableCustomDA bool,
+	useCelestiaDA ...bool,
 ) (
 	l2info info, currentNode *arbnode.Node, execNode *gethexec.ExecutionNode, l2client *ethclient.Client, l2stack *node.Node,
 	l1info info, l1backend *eth.Ethereum, l1client *ethclient.Client, l1stack *node.Node,
@@ -759,7 +761,7 @@ func createTestNodeOnL1ForBoldProtocol(
 	var addresses *chaininfo.RollupAddresses
 	var signerCfg *dataposter.ExternalSignerCfg
 	l1info, l1backend, l1client, l1stack, addresses, stakeTokenAddr, asserterOpts, signerCfg = setupL1ForBoldProtocol(
-		t, ctx, rollupStackConf, l2infoIn, useExternalSigner, nodeConfig, chainConfig, enableCustomDA,
+		t, ctx, rollupStackConf, l2infoIn, useExternalSigner, nodeConfig, chainConfig, enableCustomDA, useCelestiaDA...,
 	)
 
 	// Then create L2 node
@@ -782,6 +784,7 @@ func deployContractsOnly(
 	stakeToken common.Address,
 	asserterOpts *bind.TransactOpts,
 	enableCustomDA bool,
+	useCelestiaDA ...bool,
 ) *chaininfo.RollupAddresses {
 	l1TransactionOpts := l1info.GetDefaultTransactOpts("RollupOwner", ctx)
 	locator, err := server_common.NewMachineLocator("")
@@ -821,27 +824,35 @@ func deployContractsOnly(
 	cfg.ChainConfig = string(config)
 
 	var addresses *setup.RollupAddresses
+	celestia := len(useCelestiaDA) > 0 && useCelestiaDA[0]
 
 	if enableCustomDA {
-		t.Log("Deploying ReferenceDAProofValidator and custom OSP for custom DA")
+		var customValidatorAddr common.Address
+		if celestia {
+			t.Log("Deploying CelestiaDAProofValidator and custom OSP for custom DA")
+			mockBlobstreamAddr, celestiaValidatorAddr := deployCelestiaValidatorContracts(t, ctx, backend, &l1TransactionOpts)
+			l1info.SetContract("MockBlobstream", mockBlobstreamAddr)
+			l1info.SetContract("CelestiaDAProofValidator", celestiaValidatorAddr)
+			customValidatorAddr = celestiaValidatorAddr
+		} else {
+			t.Log("Deploying ReferenceDAProofValidator and custom OSP for custom DA")
 
-		// Deploy ReferenceDAProofValidator with trusted signers
-		// Create a dedicated DA signer account
-		l1info.GenerateAccount("DASigner")
-		trustedSigners := []common.Address{l1info.GetAddress("DASigner")}
-		refDAValidatorAddr, tx, _, err := localgen.DeployReferenceDAProofValidator(&l1TransactionOpts, backend, trustedSigners)
-		Require(t, err)
-		_, err = EnsureTxSucceeded(ctx, backend, tx)
-		Require(t, err)
-		t.Logf("Deployed ReferenceDAProofValidator at %s", refDAValidatorAddr.Hex())
-		// Store the validator address so it can be accessed by tests
-		l1info.SetContract("ReferenceDAProofValidator", refDAValidatorAddr)
+			// Deploy ReferenceDAProofValidator with trusted signers
+			// Create a dedicated DA signer account
+			l1info.GenerateAccount("DASigner")
+			trustedSigners := []common.Address{l1info.GetAddress("DASigner")}
+			refDAValidatorAddr, tx, _, err := localgen.DeployReferenceDAProofValidator(&l1TransactionOpts, backend, trustedSigners)
+			Require(t, err)
+			_, err = EnsureTxSucceeded(ctx, backend, tx)
+			Require(t, err)
+			t.Logf("Deployed ReferenceDAProofValidator at %s", refDAValidatorAddr.Hex())
+			l1info.SetContract("ReferenceDAProofValidator", refDAValidatorAddr)
+			customValidatorAddr = refDAValidatorAddr
+		}
 
-		// Deploy custom OSP contracts
-		customOspAddr := deployCustomDAOSP(t, ctx, backend, &l1TransactionOpts, refDAValidatorAddr)
+		customOspAddr := deployCustomDAOSP(t, ctx, backend, &l1TransactionOpts, customValidatorAddr)
 		t.Logf("Deployed custom OneStepProofEntry at %s", customOspAddr.Hex())
 
-		// Deploy using the custom OSP
 		rollupStackConf.CustomDAOsp = customOspAddr
 		addresses, err = setup.DeployFullRollupStack(
 			ctx,
@@ -1067,6 +1078,15 @@ func postBatchToL1(
 	return receipt
 }
 
+func isRetryableBatchSyncError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errText := err.Error()
+	return strings.Contains(errText, "missing previous sequencer batch") ||
+		strings.Contains(errText, "no metadata for batch")
+}
+
 // syncBatchToNode waits for batch to appear on L1 and adds it to the node's tracker
 func syncBatchToNode(
 	t *gotesting.T,
@@ -1082,12 +1102,18 @@ func syncBatchToNode(
 
 	batches, err := nodeSeqInbox.LookupBatchesInRange(ctx, receipt.BlockNumber, receipt.BlockNumber)
 	Require(t, err)
-
 	if len(batches) == 0 {
 		Fatal(t, "batch not found after AddSequencerL2BatchFromOrigin")
 	}
 
-	err = l2Node.InboxTracker.AddSequencerBatches(ctx, backend, batches)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		err = l2Node.InboxTracker.AddSequencerBatches(ctx, backend, batches)
+		if !isRetryableBatchSyncError(err) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 
 	if expectedFailure != "" {
 		// We expect this sync to fail with a specific error

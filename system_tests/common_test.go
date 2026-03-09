@@ -28,6 +28,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	celestiadas "github.com/celestiaorg/nitro-das-celestia/daserver"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -101,6 +102,7 @@ import (
 	"github.com/offchainlabs/nitro/validator/server_common"
 	"github.com/offchainlabs/nitro/validator/valnode"
 	rediscons "github.com/offchainlabs/nitro/validator/valnode/redis"
+	"github.com/tidwall/gjson"
 )
 
 type info = *BlockchainTestInfo
@@ -1769,10 +1771,10 @@ func deployCustomDAOSP(
 	ctx context.Context,
 	client *ethclient.Client,
 	opts *bind.TransactOpts,
-	refDAValidatorAddr common.Address,
+	customDAValidatorAddr common.Address,
 ) common.Address {
-	// Deploy custom OneStepProverHostIo with the ReferenceDAProofValidator
-	ospHostIoAddr, tx, _, err := ospgen.DeployOneStepProverHostIo(opts, client, refDAValidatorAddr)
+	// Deploy custom OneStepProverHostIo with the supplied CustomDA proof validator
+	ospHostIoAddr, tx, _, err := ospgen.DeployOneStepProverHostIo(opts, client, customDAValidatorAddr)
 	Require(t, err)
 	_, err = EnsureTxSucceeded(ctx, client, tx)
 	Require(t, err)
@@ -2358,6 +2360,108 @@ func (w *controllableWriter) GetMaxMessageSize() containers.PromiseInterface[int
 func createReferenceDAProviderServer(t *testing.T, ctx context.Context, l1Client *ethclient.Client, validatorAddr common.Address, dataSigner signature.DataSignerFunc, port int) (*http.Server, string) {
 	server, url, _ := createReferenceDAProviderServerWithControl(t, ctx, l1Client, validatorAddr, dataSigner, port, referenceda.DefaultConfig.MaxBatchSize)
 	return server, url
+}
+
+func deployCelestiaValidatorContracts(t *testing.T, ctx context.Context, client *ethclient.Client, opts *bind.TransactOpts) (common.Address, common.Address) {
+	mockBlobstreamABI := gjson.GetBytes(mockBlobstreamArtifact, "abi").Raw
+	mockBlobstreamBin := gjson.GetBytes(mockBlobstreamArtifact, "bytecode.object").String()
+	parsedMockBlobstreamABI, err := abi.JSON(strings.NewReader(mockBlobstreamABI))
+	Require(t, err)
+	mockBlobstreamAddr, tx, _, err := bind.DeployContract(opts, parsedMockBlobstreamABI, common.FromHex(mockBlobstreamBin), client)
+	Require(t, err)
+	_, err = EnsureTxSucceeded(ctx, client, tx)
+	Require(t, err)
+
+	mockBlobstream := bind.NewBoundContract(mockBlobstreamAddr, parsedMockBlobstreamABI, client, client, client)
+	tx, err = mockBlobstream.Transact(opts, "initialize", uint64(1))
+	Require(t, err)
+	_, err = EnsureTxSucceeded(ctx, client, tx)
+	Require(t, err)
+
+	celestiaValidatorABI := gjson.GetBytes(celestiaDAProofValidatorArtifact, "abi").Raw
+	celestiaValidatorBin := gjson.GetBytes(celestiaDAProofValidatorArtifact, "bytecode.object").String()
+	parsedCelestiaValidatorABI, err := abi.JSON(strings.NewReader(celestiaValidatorABI))
+	Require(t, err)
+	validatorAddr, tx, _, err := bind.DeployContract(opts, parsedCelestiaValidatorABI, common.FromHex(celestiaValidatorBin), client, mockBlobstreamAddr)
+	Require(t, err)
+	_, err = EnsureTxSucceeded(ctx, client, tx)
+	Require(t, err)
+
+	return mockBlobstreamAddr, validatorAddr
+}
+
+func createCelestiaDAProviderServer(t *testing.T, ctx context.Context, port int, opts ...func(*celestiadas.DAConfig)) (*http.Server, string) {
+	t.Helper()
+
+	celestiaRPC := strings.TrimSpace(os.Getenv("CELESTIA_RPC"))
+	if celestiaRPC == "" {
+		celestiaRPC = "http://127.0.0.1:26658"
+	}
+	authToken := strings.TrimSpace(os.Getenv("CELESTIA_AUTH_TOKEN"))
+	if authToken == "" {
+		t.Skip("CELESTIA_AUTH_TOKEN is required to run in-process Celestia DA tests")
+	}
+	namespaceID := strings.TrimSpace(os.Getenv("CELESTIA_NAMESPACE"))
+	if namespaceID == "" {
+		namespaceID = "0000008e5f679bf7116c"
+	}
+	readRPC := strings.TrimSpace(os.Getenv("CELESTIA_READ_RPC"))
+	if readRPC == "" {
+		readRPC = celestiaRPC
+	}
+	readAuthToken := strings.TrimSpace(os.Getenv("CELESTIA_READ_AUTH_TOKEN"))
+	if readAuthToken == "" {
+		readAuthToken = authToken
+	}
+	ethRPC := strings.TrimSpace(os.Getenv("CELESTIA_ETH_RPC"))
+	if ethRPC == "" {
+		ethRPC = strings.TrimSpace(os.Getenv("L1_RPC"))
+	}
+	blobstreamAddr := strings.TrimSpace(os.Getenv("BLOBSTREAM_ADDR"))
+	proofValidatorAddr := strings.TrimSpace(os.Getenv("CELESTIA_PROOF_VALIDATOR"))
+
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	Require(t, err)
+
+	serverCfg := &celestiadas.DAConfig{
+		WithWriter:       true,
+		Rpc:              celestiaRPC,
+		ReadRpc:          readRPC,
+		NamespaceId:      namespaceID,
+		AuthToken:        authToken,
+		ReadAuthToken:    readAuthToken,
+		CacheCleanupTime: time.Minute,
+		ValidatorConfig: celestiadas.ValidatorConfig{
+			EthClient:          ethRPC,
+			BlobstreamAddr:     blobstreamAddr,
+			ProofValidatorAddr: proofValidatorAddr,
+			SleepTime:          1,
+		},
+		RetryConfig: celestiadas.DefaultCelestiaRetryConfig,
+	}
+	for _, opt := range opts {
+		opt(serverCfg)
+	}
+
+	provider, err := celestiadas.NewCelestiaDA(serverCfg)
+	Require(t, err)
+	t.Cleanup(func() {
+		_ = provider.Stop()
+	})
+
+	server, err := celestiadas.StartCelestiaDASRPCServerOnListener(
+		ctx,
+		listener,
+		genericconf.HTTPServerTimeoutConfigDefault,
+		genericconf.HTTPServerBodyLimitDefault,
+		provider,
+		provider,
+	)
+	Require(t, err)
+
+	serverURL := fmt.Sprintf("http://%s", listener.Addr().String())
+	t.Logf("Started Celestia DA provider server at %s using Celestia RPC %s", serverURL, celestiaRPC)
+	return server, serverURL
 }
 
 // createReferenceDAProviderServerWithControl creates a ReferenceDA provider server with controllable error injection.
