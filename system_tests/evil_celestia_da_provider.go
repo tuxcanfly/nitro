@@ -235,18 +235,25 @@ func (e *EvilCelestiaDAProvider) GenerateCertificateValidityProof(
 	claimInvalid := e.claimInvalidByCert[certHash]
 	e.mu.RUnlock()
 
+	certBytes, err := cert.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	proof, err := e.reader.GenerateCertificateValidityProof(ctx, certBytes)
+	if err != nil {
+		return nil, err
+	}
+	if len(proof) == 0 {
+		return nil, fmt.Errorf("missing Celestia validity proof")
+	}
+
 	switch {
 	case claimValid:
-		return []byte{ValidityProofValid, ValidityProofMarker}, nil
+		proof[0] = ValidityProofValid
 	case claimInvalid:
-		return []byte{ValidityProofInvalid, ValidityProofMarker}, nil
-	default:
-		certBytes, err := cert.MarshalBinary()
-		if err != nil {
-			return nil, err
-		}
-		return e.reader.GenerateCertificateValidityProof(ctx, certBytes)
+		proof[0] = ValidityProofInvalid
 	}
+	return proof, nil
 }
 
 type evilCelestiaDAAPI struct {

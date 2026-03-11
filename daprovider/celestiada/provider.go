@@ -16,16 +16,16 @@ import (
 
 	celestiaappda "github.com/celestiaorg/celestia-app/v6/pkg/da"
 	celestiaappproof "github.com/celestiaorg/celestia-app/v6/pkg/proof"
-	celestiacert "github.com/celestiaorg/nitro-das-celestia/daserver/cert"
-	libshare "github.com/celestiaorg/go-square/v3/share"
 	square "github.com/celestiaorg/go-square/v3"
+	libshare "github.com/celestiaorg/go-square/v3/share"
+	celestiacert "github.com/celestiaorg/nitro-das-celestia/daserver/cert"
 	"github.com/celestiaorg/rsmt2d"
-	blobstreamx "github.com/succinctlabs/sp1-blobstream/bindings"
 	"github.com/cometbft/cometbft/crypto/merkle"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	blobstreamx "github.com/succinctlabs/sp1-blobstream/bindings"
 
 	"github.com/offchainlabs/nitro/arbutil"
 	"github.com/offchainlabs/nitro/daprovider"
@@ -308,11 +308,31 @@ func (p *Provider) RecoverPayloadAndPreimages(batchNum uint64, batchBlockHash co
 }
 
 func (p *Provider) GenerateCertificateValidityProof(certificate []byte) containers.PromiseInterface[daprovider.ValidityProofResult] {
-	return containers.DoPromise(context.Background(), func(context.Context) (daprovider.ValidityProofResult, error) {
+	return containers.DoPromise(context.Background(), func(ctx context.Context) (daprovider.ValidityProofResult, error) {
 		proof := []byte{0x00, celestiaValidityProofValid}
-		if _, ok := p.store.lookup(certificate); ok {
-			proof[0] = 0x01
+
+		cert := &celestiacert.CelestiaDACertV1{}
+		if err := cert.UnmarshalBinary(certificate); err != nil {
+			return daprovider.ValidityProofResult{Proof: proof}, nil
 		}
+		if cert.SharesLength == 0 || cert.DataRoot == ([32]byte{}) {
+			return daprovider.ValidityProofResult{Proof: proof}, nil
+		}
+
+		attestationProof, err := p.generateCertificateAttestationProof(ctx, cert)
+		if err != nil {
+			return daprovider.ValidityProofResult{}, err
+		}
+		if attestationProof == nil {
+			return daprovider.ValidityProofResult{Proof: proof}, nil
+		}
+
+		proofData, err := packValidityProof(*attestationProof)
+		if err != nil {
+			return daprovider.ValidityProofResult{}, err
+		}
+		proof[0] = 0x01
+		proof = append(proof, proofData...)
 		return daprovider.ValidityProofResult{Proof: proof}, nil
 	})
 }
@@ -338,9 +358,12 @@ func (p *Provider) GenerateReadPreimageProof(offset uint64, certificate []byte) 
 			return daprovider.PreimageProofResult{}, err
 		}
 
-		event, err := p.findCommitmentEvent(ctx, cert.BlockHeight)
+		event, found, err := p.findCommitmentEvent(ctx, cert.BlockHeight)
 		if err != nil {
 			return daprovider.PreimageProofResult{}, err
+		}
+		if !found {
+			return daprovider.PreimageProofResult{}, certificateValidationError("missing blobstream commitment")
 		}
 		if event.EndBlock-event.StartBlock != 1 || event.StartBlock != cert.BlockHeight {
 			return daprovider.PreimageProofResult{}, fmt.Errorf("unsupported blobstream commitment range [%d,%d) for height %d", event.StartBlock, event.EndBlock, cert.BlockHeight)
@@ -357,21 +380,21 @@ func (p *Provider) GenerateReadPreimageProof(offset uint64, certificate []byte) 
 	})
 }
 
-func (p *Provider) findCommitmentEvent(ctx context.Context, height uint64) (*blobstreamx.BindingsDataCommitmentStored, error) {
+func (p *Provider) findCommitmentEvent(ctx context.Context, height uint64) (*blobstreamx.BindingsDataCommitmentStored, bool, error) {
 	if p.l1Client == nil {
-		return nil, errors.New("missing L1 client")
+		return nil, false, errors.New("missing L1 client")
 	}
 	if p.blobstreamAddr == (common.Address{}) {
-		return nil, errors.New("missing blobstream address")
+		return nil, false, errors.New("missing blobstream address")
 	}
 
 	binding, err := blobstreamx.NewBindings(p.blobstreamAddr, p.l1Client)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	latestBlock, err := p.l1Client.BlockNumber(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	iter, err := binding.FilterDataCommitmentStored(
 		&bind.FilterOpts{Start: 0, End: &latestBlock, Context: ctx},
@@ -380,7 +403,7 @@ func (p *Provider) findCommitmentEvent(ctx context.Context, height uint64) (*blo
 		nil,
 	)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer iter.Close()
 
@@ -397,18 +420,18 @@ func (p *Provider) findCommitmentEvent(ctx context.Context, height uint64) (*blo
 		}
 	}
 	if err := iter.Error(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if match == nil {
-		return nil, fmt.Errorf("no blobstream commitment found for height %d", height)
+		return nil, false, nil
 	}
-	return match, nil
+	return match, true, nil
 }
 
 type readChunkPlan struct {
-	chunkLen       uint8
+	chunkLen        uint8
 	firstShareIndex uint64
-	shareCount     uint64
+	shareCount      uint64
 }
 
 func buildReadChunkPlan(offset, payloadSize, certStart uint64) readChunkPlan {
@@ -543,6 +566,39 @@ func shareProofToABIProof(
 	return result
 }
 
+func (p *Provider) generateCertificateAttestationProof(
+	ctx context.Context,
+	cert *celestiacert.CelestiaDACertV1,
+) (*AttestationProof, error) {
+	event, found, err := p.findCommitmentEvent(ctx, cert.BlockHeight)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	if event.EndBlock-event.StartBlock != 1 || event.StartBlock != cert.BlockHeight {
+		return nil, nil
+	}
+	if event.DataCommitment != singleBlockTupleRoot(cert.BlockHeight, cert.DataRoot) {
+		return nil, nil
+	}
+
+	attestationProof := AttestationProof{
+		TupleRootNonce: uint256Big(event.ProofNonce.Uint64()),
+		Tuple: DataRootTuple{
+			Height:   uint256Big(cert.BlockHeight),
+			DataRoot: cert.DataRoot,
+		},
+		Proof: BinaryMerkleProof{
+			SideNodes: nil,
+			Key:       uint256Big(0),
+			NumLeaves: uint256Big(1),
+		},
+	}
+	return &attestationProof, nil
+}
+
 func namespaceID28(in []byte) [28]byte {
 	var out [28]byte
 	copy(out[:], in)
@@ -551,4 +607,15 @@ func namespaceID28(in []byte) [28]byte {
 
 func uint256Big(v uint64) *big.Int {
 	return new(big.Int).SetUint64(v)
+}
+
+func singleBlockTupleRoot(height uint64, dataRoot [32]byte) [32]byte {
+	var encodedHeight [32]byte
+	new(big.Int).SetUint64(height).FillBytes(encodedHeight[:])
+
+	leafInput := make([]byte, 0, 1+len(encodedHeight)+len(dataRoot))
+	leafInput = append(leafInput, 0x00)
+	leafInput = append(leafInput, encodedHeight[:]...)
+	leafInput = append(leafInput, dataRoot[:]...)
+	return sha256.Sum256(leafInput)
 }

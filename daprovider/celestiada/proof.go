@@ -225,6 +225,54 @@ func packSharesProof(blobstreamAddr common.Address, sharesProof SharesProof) ([]
 	)
 }
 
+func packValidityProof(attestationProof AttestationProof) ([]byte, error) {
+	type binaryMerkleProofABI struct {
+		SideNodes [][32]byte
+		Key       *big.Int
+		NumLeaves *big.Int
+	}
+	type dataRootTupleABI struct {
+		Height   *big.Int
+		DataRoot [32]byte
+	}
+	type attestationProofABI struct {
+		TupleRootNonce *big.Int
+		Tuple          dataRootTupleABI
+		Proof          binaryMerkleProofABI
+	}
+
+	args := abi.Arguments{
+		{
+			Name: "attestationProof",
+			Type: mustABIType("tuple", []abi.ArgumentMarshaling{
+				{Name: "tupleRootNonce", Type: "uint256"},
+				{Name: "tuple", Type: "tuple", Components: []abi.ArgumentMarshaling{
+					{Name: "height", Type: "uint256"},
+					{Name: "dataRoot", Type: "bytes32"},
+				}},
+				{Name: "proof", Type: "tuple", Components: []abi.ArgumentMarshaling{
+					{Name: "sideNodes", Type: "bytes32[]"},
+					{Name: "key", Type: "uint256"},
+					{Name: "numLeaves", Type: "uint256"},
+				}},
+			}),
+		},
+	}
+
+	return args.Pack(attestationProofABI{
+		TupleRootNonce: attestationProof.TupleRootNonce,
+		Tuple: dataRootTupleABI{
+			Height:   attestationProof.Tuple.Height,
+			DataRoot: attestationProof.Tuple.DataRoot,
+		},
+		Proof: binaryMerkleProofABI{
+			SideNodes: attestationProof.Proof.SideNodes,
+			Key:       attestationProof.Proof.Key,
+			NumLeaves: attestationProof.Proof.NumLeaves,
+		},
+	})
+}
+
 func mustABIType(name string, components []abi.ArgumentMarshaling) abi.Type {
 	typ, err := abi.NewType(name, "", components)
 	if err != nil {

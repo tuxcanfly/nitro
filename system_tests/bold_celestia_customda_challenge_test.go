@@ -354,7 +354,7 @@ func testChallengeProtocolBOLDCelestiaDA(t *testing.T, evilStrategy CelestiaCust
 			}
 		}
 	case CelestiaInvalidCertClaimedValid:
-		invalidCert := mutateCelestiaCertTxCommitment(goodCert2)
+		invalidCert := mutateCelestiaCertDataRoot(goodCert2)
 		invalidCertKeccak := celestiaCertHash(invalidCert)
 		evilProvider.SetReadAlias(invalidCertKeccak, goodCert2)
 		evilProvider.SetReadPreimageProofAlias(invalidCertKeccak, goodCert2)
@@ -520,10 +520,6 @@ func testChallengeProtocolBOLDCelestiaDA(t *testing.T, evilStrategy CelestiaCust
 	fromBlock := uint64(0)
 	expectedOSPWinner := l1info.GetDefaultTransactOpts("Asserter", ctx).From
 	expectedOSPWinnerLabel := "honest"
-	if evilStrategy == CelestiaValidCertClaimedInvalid {
-		expectedOSPWinner = l1info.GetDefaultTransactOpts("EvilAsserter", ctx).From
-		expectedOSPWinnerLabel = "evil"
-	}
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -542,23 +538,23 @@ func testChallengeProtocolBOLDCelestiaDA(t *testing.T, evilStrategy CelestiaCust
 					t.Fatalf("iterator error: %v", it.Error())
 				}
 				t.Log("Received event of OSP confirmation!")
-					tx, _, err := l1client.TransactionByHash(ctx, it.Event.Raw.TxHash)
-					Require(t, err)
-					signer := types.NewCancunSigner(tx.ChainId())
-					winner, err := signer.Sender(tx)
-					Require(t, err)
-					if winner == expectedOSPWinner {
-						t.Logf("%s party won OSP", expectedOSPWinnerLabel)
-						Require(t, it.Close())
-						time.Sleep(5 * time.Second)
-						return
-					}
-					if winner == l1info.GetDefaultTransactOpts("Asserter", ctx).From || winner == l1info.GetDefaultTransactOpts("EvilAsserter", ctx).From {
-						t.Fatalf("unexpected OSP winner %s for strategy %v", winner.Hex(), evilStrategy)
-					}
+				tx, _, err := l1client.TransactionByHash(ctx, it.Event.Raw.TxHash)
+				Require(t, err)
+				signer := types.NewCancunSigner(tx.ChainId())
+				winner, err := signer.Sender(tx)
+				Require(t, err)
+				if winner == expectedOSPWinner {
+					t.Logf("%s party won OSP", expectedOSPWinnerLabel)
+					Require(t, it.Close())
+					time.Sleep(5 * time.Second)
+					return
 				}
-				fromBlock = toBlock
-			case <-ctx.Done():
+				if winner == l1info.GetDefaultTransactOpts("Asserter", ctx).From || winner == l1info.GetDefaultTransactOpts("EvilAsserter", ctx).From {
+					t.Fatalf("unexpected OSP winner %s for strategy %v", winner.Hex(), evilStrategy)
+				}
+			}
+			fromBlock = toBlock
+		case <-ctx.Done():
 			t.Fatal("context cancelled before Celestia OSP confirmation")
 		}
 	}

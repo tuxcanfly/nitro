@@ -95,10 +95,10 @@ func createEvilCelestiaDAProviderServer(
 	return server, server.Addr, evilProvider
 }
 
-func mutateCelestiaCertTxCommitment(certBytes []byte) []byte {
+func mutateCelestiaCertDataRoot(certBytes []byte) []byte {
 	mutated := append([]byte(nil), certBytes...)
 	if len(mutated) >= celestiacert.CelestiaDACertV1Len {
-		mutated[28] ^= 0x01
+		mutated[60] ^= 0x01
 	}
 	return mutated
 }
