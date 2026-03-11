@@ -6,24 +6,52 @@
 package arbtest
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"sync"
 
 	celestiacert "github.com/celestiaorg/nitro-das-celestia/daserver/cert"
-	celestiatypes "github.com/celestiaorg/nitro-das-celestia/daserver/types"
-	"github.com/celestiaorg/nitro-das-celestia/daserver/types/tree"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/offchainlabs/nitro/arbutil"
 	"github.com/offchainlabs/nitro/daprovider"
+	"github.com/offchainlabs/nitro/daprovider/celestiada"
 	"github.com/offchainlabs/nitro/util/containers"
 )
 
+type celestiaDAReader interface {
+	Read(context.Context, *celestiacert.CelestiaDACertV1) (*celestiada.ReadResult, error)
+	GenerateReadPreimageProof(context.Context, uint64, []byte) ([]byte, error)
+	GenerateCertificateValidityProof(context.Context, []byte) ([]byte, error)
+}
+
+type celestiaDAProviderAdapter struct {
+	provider *celestiada.Provider
+}
+
+func (a *celestiaDAProviderAdapter) Read(ctx context.Context, cert *celestiacert.CelestiaDACertV1) (*celestiada.ReadResult, error) {
+	return a.provider.Read(ctx, cert)
+}
+
+func (a *celestiaDAProviderAdapter) GenerateReadPreimageProof(ctx context.Context, offset uint64, certificate []byte) ([]byte, error) {
+	result, err := a.provider.GenerateReadPreimageProof(offset, certificate).Await(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return result.Proof, nil
+}
+
+func (a *celestiaDAProviderAdapter) GenerateCertificateValidityProof(ctx context.Context, certificate []byte) ([]byte, error) {
+	result, err := a.provider.GenerateCertificateValidityProof(certificate).Await(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return result.Proof, nil
+}
+
 type EvilCelestiaDAProvider struct {
-	reader celestiatypes.CelestiaReader
+	reader celestiaDAReader
 
 	mu                   sync.RWMutex
 	evilPayloadByCert    map[common.Hash][]byte
@@ -33,7 +61,7 @@ type EvilCelestiaDAProvider struct {
 	claimValidByCert     map[common.Hash]bool
 }
 
-func NewEvilCelestiaDAProvider(reader celestiatypes.CelestiaReader) *EvilCelestiaDAProvider {
+func NewEvilCelestiaDAProvider(reader celestiaDAReader) *EvilCelestiaDAProvider {
 	return &EvilCelestiaDAProvider{
 		reader:               reader,
 		evilPayloadByCert:    make(map[common.Hash][]byte),
@@ -94,7 +122,7 @@ func parseCelestiaCert(certBytes []byte) (*celestiacert.CelestiaDACertV1, error)
 	return parsed, nil
 }
 
-func cloneCelestiaReadResult(res *celestiatypes.ReadResult) *celestiatypes.ReadResult {
+func cloneCelestiaReadResult(res *celestiada.ReadResult) *celestiada.ReadResult {
 	if res == nil {
 		return nil
 	}
@@ -129,7 +157,7 @@ func (e *EvilCelestiaDAProvider) shouldBypassPreimageValidation(certHash common.
 	return len(e.evilPayloadByCert[certHash]) != 0 || len(e.readAliasByCert[certHash]) != 0
 }
 
-func (e *EvilCelestiaDAProvider) Read(ctx context.Context, cert *celestiacert.CelestiaDACertV1) (*celestiatypes.ReadResult, error) {
+func (e *EvilCelestiaDAProvider) Read(ctx context.Context, cert *celestiacert.CelestiaDACertV1) (*celestiada.ReadResult, error) {
 	certHash, err := celestiaCertHashFromParsed(cert)
 	if err != nil {
 		return nil, err
@@ -161,10 +189,6 @@ func (e *EvilCelestiaDAProvider) Read(ctx context.Context, cert *celestiacert.Ce
 	return cloned, nil
 }
 
-func (e *EvilCelestiaDAProvider) GetProof(ctx context.Context, msg []byte) ([]byte, error) {
-	return e.reader.GetProof(ctx, msg)
-}
-
 func (e *EvilCelestiaDAProvider) GenerateReadPreimageProof(
 	ctx context.Context,
 	offset uint64,
@@ -179,14 +203,22 @@ func (e *EvilCelestiaDAProvider) GenerateReadPreimageProof(
 	aliasedCert := append([]byte(nil), e.readProofAliasByCert[certHash]...)
 	e.mu.RUnlock()
 	if len(aliasedCert) == 0 {
-		return e.reader.GenerateReadPreimageProof(ctx, offset, cert)
+		certBytes, err := cert.MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+		return e.reader.GenerateReadPreimageProof(ctx, offset, certBytes)
 	}
 
 	parsed, err := parseCelestiaCert(aliasedCert)
 	if err != nil {
 		return nil, fmt.Errorf("parse aliased read-preimage cert: %w", err)
 	}
-	return e.reader.GenerateReadPreimageProof(ctx, offset, parsed)
+	certBytes, err := parsed.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	return e.reader.GenerateReadPreimageProof(ctx, offset, certBytes)
 }
 
 func (e *EvilCelestiaDAProvider) GenerateCertificateValidityProof(
@@ -209,7 +241,11 @@ func (e *EvilCelestiaDAProvider) GenerateCertificateValidityProof(
 	case claimInvalid:
 		return []byte{ValidityProofInvalid, ValidityProofMarker}, nil
 	default:
-		return e.reader.GenerateCertificateValidityProof(ctx, cert)
+		certBytes, err := cert.MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+		return e.reader.GenerateCertificateValidityProof(ctx, certBytes)
 	}
 }
 
@@ -221,7 +257,7 @@ type evilCelestiaDAAPI struct {
 func newEvilCelestiaDAAPI(provider *EvilCelestiaDAProvider) *evilCelestiaDAAPI {
 	return &evilCelestiaDAAPI{
 		provider:   provider,
-		baseReader: celestiatypes.NewReaderForCelestia(provider),
+		baseReader: celestiada.NewReader(provider),
 	}
 }
 
@@ -260,20 +296,6 @@ func (e *evilCelestiaDAAPI) recoverInternal(
 		return nil, nil, err
 	}
 	preimageRecorder(crypto.Keccak256Hash(certBytes), result.Message, arbutil.DACertificatePreimageType)
-
-	odsSize := result.SquareSize / 2
-	rowIndex := result.StartRow
-	for _, row := range result.Rows {
-		treeConstructor := tree.NewConstructor(preimageRecorder, odsSize)
-		root, err := tree.ComputeNmtRoot(treeConstructor, uint(rowIndex), row)
-		if err != nil {
-			return nil, nil, err
-		}
-		if !bytes.Equal(result.RowRoots[rowIndex], root) {
-			return nil, nil, errors.New("row root mismatch")
-		}
-		rowIndex++
-	}
 
 	return result.Message, preimages, nil
 }

@@ -9,10 +9,7 @@ import (
 	"context"
 	"math/big"
 	"testing"
-	"time"
 
-	celestiadas "github.com/celestiaorg/nitro-das-celestia/daserver"
-	celestiatypes "github.com/celestiaorg/nitro-das-celestia/daserver/types"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
@@ -22,6 +19,7 @@ import (
 	"github.com/offchainlabs/nitro/bold/testing/setup"
 	"github.com/offchainlabs/nitro/cmd/chaininfo"
 	"github.com/offchainlabs/nitro/daprovider"
+	"github.com/offchainlabs/nitro/daprovider/celestiada"
 	"github.com/offchainlabs/nitro/daprovider/daclient"
 	"github.com/offchainlabs/nitro/daprovider/data_streaming"
 	"github.com/offchainlabs/nitro/execution_consensus"
@@ -32,13 +30,6 @@ import (
 func TestBOLDCelestiaDA_SetupVerification(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	celestiaRPC := mustEnv(t, "CELESTIA_RPC")
-	authToken := mustEnv(t, "CELESTIA_AUTH_TOKEN")
-	t.Logf("Using Celestia RPC %s", celestiaRPC)
-	if authToken == "" {
-		t.Fatal("expected non-empty Celestia auth token")
-	}
 
 	var transferGas = util.NormalizeL2GasForL1GasInitial(800_000, params.GWei)
 	l2chainConfig := chaininfo.ArbitrumDevTestChainConfig()
@@ -88,15 +79,14 @@ func TestBOLDCelestiaDA_SetupVerification(t *testing.T) {
 		t.Fatalf("validator code missing at %s", validatorAddr.Hex())
 	}
 
-	providerServer, providerURL := createCelestiaDAProviderServer(
+	store := celestiada.NewStore()
+	providerServer, providerURL, provider := createCelestiaDAProviderServer(
 		t,
 		ctx,
+		store,
+		l1client,
+		mockBlobstreamAddr,
 		0,
-		func(cfg *celestiadas.DAConfig) {
-			cfg.ValidatorConfig.EthClient = l1stack.HTTPEndpoint()
-			cfg.ValidatorConfig.BlobstreamAddr = mockBlobstreamAddr.Hex()
-			cfg.ValidatorConfig.ProofValidatorAddr = validatorAddr.Hex()
-		},
 	)
 	defer func() { _ = providerServer.Shutdown(context.Background()) }()
 	if providerURL == "" {
@@ -104,33 +94,15 @@ func TestBOLDCelestiaDA_SetupVerification(t *testing.T) {
 	}
 	nodeConfig.DA.ExternalProvider.RPC.URL = providerURL
 
-	celestiaCfg := &celestiadas.DAConfig{
-		WithWriter:       true,
-		Rpc:              celestiaRPC,
-		ReadRpc:          envOr("CELESTIA_READ_RPC", celestiaRPC),
-		NamespaceId:      envOr("CELESTIA_NAMESPACE", "0000008e5f679bf7116c"),
-		AuthToken:        authToken,
-		ReadAuthToken:    envOr("CELESTIA_READ_AUTH_TOKEN", authToken),
-		CacheCleanupTime: time.Minute,
-		ValidatorConfig: celestiadas.ValidatorConfig{
-			EthClient:          l1stack.HTTPEndpoint(),
-			BlobstreamAddr:     mockBlobstreamAddr.Hex(),
-			ProofValidatorAddr: validatorAddr.Hex(),
-			SleepTime:          1,
-		},
-		RetryConfig: celestiadas.DefaultCelestiaRetryConfig,
-	}
-	celestiaDA, err := celestiadas.NewCelestiaDA(celestiaCfg)
-	Require(t, err)
-	defer func() { _ = celestiaDA.Stop() }()
-
-	daWriter := celestiatypes.NewWriterForCelestia(celestiaDA)
-	certificate, err := daWriter.Store([]byte("celestia setup verification payload"), 3600).Await(ctx)
+	certificate, err := provider.Store([]byte("celestia setup verification payload"), 3600).Await(ctx)
 	Require(t, err)
 	if len(certificate) == 0 {
 		t.Fatal("expected non-empty Celestia certificate")
 	}
 	t.Logf("Generated Celestia certificate (%d bytes)", len(certificate))
+
+	mockTxOpts := l1info.GetDefaultTransactOpts("RollupOwner", ctx)
+	submitMockBlobstreamForCelestiaCert(t, ctx, l1client, &mockTxOpts, mockBlobstreamAddr, certificate)
 
 	daClient, err := daclient.NewClient(ctx, daclient.TestClientConfig(providerURL), data_streaming.PayloadCommiter())
 	Require(t, err)
@@ -163,10 +135,12 @@ func TestBOLDCelestiaDA_SetupVerification(t *testing.T) {
 	seqInboxBinding, err := bridgegen.NewSequencerInbox(seqInboxAddr, l1client)
 	Require(t, err)
 	batchData := createBoldBatchData(t, l2info, 5, -1)
-	certificate = postBatchWithDA(t, l2node, l1client, &sequencerTxOpts, seqInboxBinding, seqInboxAddr, batchData, daWriter)
+	certificate = postBatchWithDA(t, l2node, l1client, &sequencerTxOpts, seqInboxBinding, seqInboxAddr, batchData, provider)
 	if len(certificate) == 0 {
 		t.Fatal("expected non-empty posted Celestia certificate")
 	}
+	mockTxOpts = l1info.GetDefaultTransactOpts("RollupOwner", ctx)
+	submitMockBlobstreamForCelestiaCert(t, ctx, l1client, &mockTxOpts, mockBlobstreamAddr, certificate)
 
 	newBatchCount, err := l2node.InboxTracker.GetBatchCount()
 	Require(t, err)

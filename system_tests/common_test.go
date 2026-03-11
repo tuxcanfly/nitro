@@ -28,7 +28,6 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	celestiadas "github.com/celestiaorg/nitro-das-celestia/daserver"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -2388,80 +2387,6 @@ func deployCelestiaValidatorContracts(t *testing.T, ctx context.Context, client 
 	Require(t, err)
 
 	return mockBlobstreamAddr, validatorAddr
-}
-
-func createCelestiaDAProviderServer(t *testing.T, ctx context.Context, port int, opts ...func(*celestiadas.DAConfig)) (*http.Server, string) {
-	t.Helper()
-
-	celestiaRPC := strings.TrimSpace(os.Getenv("CELESTIA_RPC"))
-	if celestiaRPC == "" {
-		celestiaRPC = "http://127.0.0.1:26658"
-	}
-	authToken := strings.TrimSpace(os.Getenv("CELESTIA_AUTH_TOKEN"))
-	if authToken == "" {
-		t.Skip("CELESTIA_AUTH_TOKEN is required to run in-process Celestia DA tests")
-	}
-	namespaceID := strings.TrimSpace(os.Getenv("CELESTIA_NAMESPACE"))
-	if namespaceID == "" {
-		namespaceID = "0000008e5f679bf7116c"
-	}
-	readRPC := strings.TrimSpace(os.Getenv("CELESTIA_READ_RPC"))
-	if readRPC == "" {
-		readRPC = celestiaRPC
-	}
-	readAuthToken := strings.TrimSpace(os.Getenv("CELESTIA_READ_AUTH_TOKEN"))
-	if readAuthToken == "" {
-		readAuthToken = authToken
-	}
-	ethRPC := strings.TrimSpace(os.Getenv("CELESTIA_ETH_RPC"))
-	if ethRPC == "" {
-		ethRPC = strings.TrimSpace(os.Getenv("L1_RPC"))
-	}
-	blobstreamAddr := strings.TrimSpace(os.Getenv("BLOBSTREAM_ADDR"))
-	proofValidatorAddr := strings.TrimSpace(os.Getenv("CELESTIA_PROOF_VALIDATOR"))
-
-	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	Require(t, err)
-
-	serverCfg := &celestiadas.DAConfig{
-		WithWriter:       true,
-		Rpc:              celestiaRPC,
-		ReadRpc:          readRPC,
-		NamespaceId:      namespaceID,
-		AuthToken:        authToken,
-		ReadAuthToken:    readAuthToken,
-		CacheCleanupTime: time.Minute,
-		ValidatorConfig: celestiadas.ValidatorConfig{
-			EthClient:          ethRPC,
-			BlobstreamAddr:     blobstreamAddr,
-			ProofValidatorAddr: proofValidatorAddr,
-			SleepTime:          1,
-		},
-		RetryConfig: celestiadas.DefaultCelestiaRetryConfig,
-	}
-	for _, opt := range opts {
-		opt(serverCfg)
-	}
-
-	provider, err := celestiadas.NewCelestiaDA(serverCfg)
-	Require(t, err)
-	t.Cleanup(func() {
-		_ = provider.Stop()
-	})
-
-	server, err := celestiadas.StartCelestiaDASRPCServerOnListener(
-		ctx,
-		listener,
-		genericconf.HTTPServerTimeoutConfigDefault,
-		genericconf.HTTPServerBodyLimitDefault,
-		provider,
-		provider,
-	)
-	Require(t, err)
-
-	serverURL := fmt.Sprintf("http://%s", listener.Addr().String())
-	t.Logf("Started Celestia DA provider server at %s using Celestia RPC %s", serverURL, celestiaRPC)
-	return server, serverURL
 }
 
 // createReferenceDAProviderServerWithControl creates a ReferenceDA provider server with controllable error injection.

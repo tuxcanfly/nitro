@@ -13,9 +13,7 @@ import (
 	"testing"
 	"time"
 
-	celestiadas "github.com/celestiaorg/nitro-das-celestia/daserver"
 	celestiacert "github.com/celestiaorg/nitro-das-celestia/daserver/cert"
-	celestiatypes "github.com/celestiaorg/nitro-das-celestia/daserver/types"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
@@ -34,6 +32,7 @@ import (
 	"github.com/offchainlabs/nitro/bold/testing/setup"
 	"github.com/offchainlabs/nitro/cmd/chaininfo"
 	"github.com/offchainlabs/nitro/daprovider"
+	"github.com/offchainlabs/nitro/daprovider/celestiada"
 	"github.com/offchainlabs/nitro/daprovider/daclient"
 	"github.com/offchainlabs/nitro/daprovider/data_streaming"
 	"github.com/offchainlabs/nitro/execution_consensus"
@@ -65,7 +64,7 @@ func TestChallengeProtocolBOLDCelestiaDA_EvilDataEvilCert(t *testing.T) {
 
 // Celestia certificates are not signer-based; this covers the equivalent
 // "invalid cert claimed valid" divergence used by the validity OSP path.
-func TestChallengeProtocolBOLDCelestiaDA_UntrustedSignerCert(t *testing.T) {
+func TestChallengeProtocolBOLDCelestiaDA_InvalidCertClaimedValid(t *testing.T) {
 	testChallengeProtocolBOLDCelestiaDA(t, CelestiaInvalidCertClaimedValid)
 }
 
@@ -119,28 +118,28 @@ func testChallengeProtocolBOLDCelestiaDA(t *testing.T, evilStrategy CelestiaCust
 		t.Fatal("Celestia validator contracts were not deployed")
 	}
 
-	cfgA := newCelestiaDATestConfig(t, l1stack.HTTPEndpoint(), l1client, mockBlobstreamAddr, validatorAddr)
-	providerServerA, providerURLNodeA := createCelestiaDAProviderServer(
+	store := celestiada.NewStore()
+	providerServerA, providerURLNodeA, daWriter := createCelestiaDAProviderServer(
 		t,
 		ctx,
+		store,
+		l1client,
+		mockBlobstreamAddr,
 		0,
-		func(serverCfg *celestiadas.DAConfig) {
-			*serverCfg = *cfgA
-		},
 	)
 	defer func() { _ = providerServerA.Shutdown(context.Background()) }()
 
-	cfgB := newCelestiaDATestConfig(t, l1stack.HTTPEndpoint(), l1client, mockBlobstreamAddr, validatorAddr)
-	providerServerB, providerURLNodeB, evilProvider := createEvilCelestiaDAProviderServer(t, ctx, 0, cfgB)
+	providerServerB, providerURLNodeB, evilProvider := createEvilCelestiaDAProviderServer(
+		t,
+		ctx,
+		store,
+		l1client,
+		mockBlobstreamAddr,
+		0,
+	)
 	defer func() { _ = providerServerB.Shutdown(context.Background()) }()
 
 	nodeConfigA.DA.ExternalProvider.RPC.URL = providerURLNodeA
-
-	writerCfg := newCelestiaDATestConfig(t, l1stack.HTTPEndpoint(), l1client, mockBlobstreamAddr, validatorAddr)
-	celestiaDA, err := celestiadas.NewCelestiaDA(writerCfg)
-	Require(t, err)
-	defer func() { _ = celestiaDA.Stop() }()
-	daWriter := celestiatypes.NewWriterForCelestia(celestiaDA)
 
 	l2info, l2nodeA, l2execNodeA, _, l2stackA, assertionChain := createL2NodeForBoldProtocol(
 		t, ctx, true, nodeConfigA, l2chainConfig, l2info,
@@ -519,6 +518,12 @@ func testChallengeProtocolBOLDCelestiaDA(t *testing.T, evilStrategy CelestiaCust
 	Require(t, err)
 
 	fromBlock := uint64(0)
+	expectedOSPWinner := l1info.GetDefaultTransactOpts("Asserter", ctx).From
+	expectedOSPWinnerLabel := "honest"
+	if evilStrategy == CelestiaValidCertClaimedInvalid {
+		expectedOSPWinner = l1info.GetDefaultTransactOpts("EvilAsserter", ctx).From
+		expectedOSPWinnerLabel = "evil"
+	}
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -537,20 +542,23 @@ func testChallengeProtocolBOLDCelestiaDA(t *testing.T, evilStrategy CelestiaCust
 					t.Fatalf("iterator error: %v", it.Error())
 				}
 				t.Log("Received event of OSP confirmation!")
-				tx, _, err := l1client.TransactionByHash(ctx, it.Event.Raw.TxHash)
-				Require(t, err)
-				signer := types.NewCancunSigner(tx.ChainId())
-				winner, err := signer.Sender(tx)
-				Require(t, err)
-				if winner == l1info.GetDefaultTransactOpts("Asserter", ctx).From {
-					t.Log("Honest party won OSP, impossible for evil party to win if honest party continues")
-					Require(t, it.Close())
-					time.Sleep(5 * time.Second)
-					return
+					tx, _, err := l1client.TransactionByHash(ctx, it.Event.Raw.TxHash)
+					Require(t, err)
+					signer := types.NewCancunSigner(tx.ChainId())
+					winner, err := signer.Sender(tx)
+					Require(t, err)
+					if winner == expectedOSPWinner {
+						t.Logf("%s party won OSP", expectedOSPWinnerLabel)
+						Require(t, it.Close())
+						time.Sleep(5 * time.Second)
+						return
+					}
+					if winner == l1info.GetDefaultTransactOpts("Asserter", ctx).From || winner == l1info.GetDefaultTransactOpts("EvilAsserter", ctx).From {
+						t.Fatalf("unexpected OSP winner %s for strategy %v", winner.Hex(), evilStrategy)
+					}
 				}
-			}
-			fromBlock = toBlock
-		case <-ctx.Done():
+				fromBlock = toBlock
+			case <-ctx.Done():
 			t.Fatal("context cancelled before Celestia OSP confirmation")
 		}
 	}
