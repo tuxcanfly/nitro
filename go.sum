@@ -189,8 +189,8 @@ github.com/celestiaorg/ibc-go/v8 v8.7.2 h1:AWae851fdX7pJWlGnUBKlKJzpr4c2t5m4TLs6
 github.com/celestiaorg/ibc-go/v8 v8.7.2/go.mod h1:E3WTax+cfyDIehNRpwEI96/0E8GBtU1g9XWr18qUGZ8=
 github.com/celestiaorg/merkletree v0.0.0-20230308153949-c33506a7aa26 h1:P2RI1xJ49EZ8cuHMcH+ZSBonfRDtBS8OS9Jdt1BWX3k=
 github.com/celestiaorg/merkletree v0.0.0-20230308153949-c33506a7aa26/go.mod h1:2m8ukndOegwB0PU0AfJCwDUQHqd7QQRlSXvQL5VToVY=
-github.com/celestiaorg/nitro-das-celestia v0.7.0-mocha.0.20260310173207-a8d338c0228f h1:91DO2smYvMXGDDfWWfXMLIBhUpY0wAWDjNfESVinQzw=
-github.com/celestiaorg/nitro-das-celestia v0.7.0-mocha.0.20260310173207-a8d338c0228f/go.mod h1:fCUupXqVHkyKv1A2Bc2Vdv190HIyC8DdpLreDSSB+Rc=
+github.com/celestiaorg/nitro-das-celestia v0.7.0-mocha.0.20260312153835-0872b54ed1d9 h1:+XTUnK0Hgh1A0LUIIzc+MZ3QgHh5b7hrmc2CaaxWmvw=
+github.com/celestiaorg/nitro-das-celestia v0.7.0-mocha.0.20260312153835-0872b54ed1d9/go.mod h1:fCUupXqVHkyKv1A2Bc2Vdv190HIyC8DdpLreDSSB+Rc=
 github.com/celestiaorg/nmt v0.24.2 h1:LlpJSPOd6/Lw1Ig6HUhZuqiINHLka/ZSRTBzlNJpchg=
 github.com/celestiaorg/nmt v0.24.2/go.mod h1:vgLBpWBi8F5KLxTdXSwb7AU4NhiIQ1AQRGa+PzdcLEA=
 github.com/celestiaorg/rsmt2d v0.15.1 h1:NF4D0LX501oDjw00RoJrTUrMHrO+Kv0LewL0FKQU7hg=

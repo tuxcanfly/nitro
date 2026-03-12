@@ -20,7 +20,7 @@ require (
 	github.com/ccoveille/go-safecast v1.1.0
 	github.com/celestiaorg/celestia-app/v6 v6.4.10
 	github.com/celestiaorg/go-square/v3 v3.0.2
-	github.com/celestiaorg/nitro-das-celestia v0.7.0-mocha.0.20260310173207-a8d338c0228f
+	github.com/celestiaorg/nitro-das-celestia v0.7.0-mocha.0.20260312153835-0872b54ed1d9
 	github.com/celestiaorg/rsmt2d v0.15.1
 	github.com/cockroachdb/pebble v1.1.5
 	github.com/codeclysm/extract/v3 v3.0.2
